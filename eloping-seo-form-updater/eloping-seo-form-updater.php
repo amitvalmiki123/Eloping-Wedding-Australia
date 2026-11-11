@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Eloping SEO Form Bulk Updater
  * Plugin URI:  https://elopingweddings.com.au/
- * Description: One-click bulk update of the "Form Shortcode" fields (Hero + CTA) on every page that uses the SEO Landing template. Replaces the Contact Form 7 shortcode with the same Studio Ninja iframe embed used on the Contact Us page, so the form stays consistent across all SEO landing pages. Touches ONLY those two fields on those pages — no menus, no header/footer, no other pages, no other fields, no theme changes.
- * Version:     1.1.0
+ * Description: One-click bulk update of the "Form Shortcode" fields (Hero + CTA) on every page that uses the SEO Landing template. Replaces the Contact Form 7 shortcode with the Studio Ninja iframe embed used on the Contact Us page (the CTA instance carries a distinct internal iframe id so the two iframes on a page never collide). Touches ONLY those two fields on those pages — no menus, no other pages, no other fields, no theme changes.
+ * Version:     1.2.0
  * Author:      Eloping Weddings
  * License:     GPL-2.0-or-later
  * Text Domain: eloping-seo-form-updater
@@ -33,54 +33,75 @@ if ( ! defined( 'ELFU_NOTICE_TRANSIENT' ) ) {
 /* =========================================================================
  * FORM FIELDS
  *
- * The "Form Shortcode" fields (ACF) on the SEO Landing template that hold
- * the hero banner form and the bottom CTA band form
+ * The two "Form Shortcode" fields (ACF) on the SEO Landing template
  * (registered in the child theme, inc/seo-landing-acf.php).
+ *
+ * WHY DIFFERENT IDS: the Studio Ninja embed ships with iFrameSizer, which
+ * tracks iframes BY THEIR DOM `id` attribute. A page carries BOTH the hero
+ * and the CTA embed, so the two instances must have different internal ids
+ * or the resizer resizes the wrong iframe and the form gets cut off. The
+ * `src` (and therefore the actual form, its fields and its submission) is
+ * IDENTICAL for both.
  * ========================================================================= */
 
 /**
- * List of ACF field names to update. Filterable if you ever want to
- * narrow or widen the set (e.g. hero only).
+ * Form-field spec: label + the internal iframe id this field's embed uses.
+ * Filterable if you ever want to narrow or widen the set.
  */
 function elfu_form_fields() {
     $fields = array(
-        'seo_hero_form' => __( 'Hero banner — "Form Shortcode" field', 'eloping-seo-form-updater' ),
-        'seo_cta_form'  => __( 'Bottom CTA band — "Form Shortcode" field', 'eloping-seo-form-updater' ),
+        'seo_hero_form' => array(
+            'label' => __( 'Hero banner — "Form Shortcode" field', 'eloping-seo-form-updater' ),
+            'id'    => 'sn-form-m1co4',
+        ),
+        'seo_cta_form'  => array(
+            'label' => __( 'Bottom CTA band — "Form Shortcode" field', 'eloping-seo-form-updater' ),
+            'id'    => 'sn-form-m1co4-cta',
+        ),
     );
     return apply_filters( 'eloping_seo_form_fields', $fields );
 }
 
 /* =========================================================================
- * TARGET VALUE — the exact iframe embed used on the Contact Us page
- * (source: the contact page's "contact_form_iframe" ACF field).
+ * TARGET VALUE — the iframe embed used on the Contact Us page
+ * (source: the contact page's "contact_form_iframe" ACF field), with a
+ * per-field internal id (see elfu_form_fields()).
  * ========================================================================= */
 
 /**
- * The iframe code that will be written to every form field of every
- * SEO landing page. Filterable if the Studio Ninja form ever changes.
+ * The part of the src that identifies this exact Studio Ninja form
+ * (used to tell "the same form, different id" from "a different form").
  */
-function elfu_target_iframe_code() {
+function elfu_form_identifier() {
+    return 'app.studioninja.co/contactform/parser/0a800fc9-a1a6-1d6c-81a1-c80ad5b35d26/0a800fc9-a1a6-1d6c-81a1-c80ad5d25d28';
+}
+
+/**
+ * Build the embed code for a given internal iframe id.
+ * Filterable if the Studio Ninja form ever changes.
+ */
+function elfu_target_iframe_code( $id ) {
     $code = <<<HTML
 <iframe
     height="693"
     style="min-width: 100%; max-width: 600px; border: 0;"
-    id="sn-form-m1co4"
+    id="__ELFU_ID__"
     src="https://app.studioninja.co/contactform/parser/0a800fc9-a1a6-1d6c-81a1-c80ad5b35d26/0a800fc9-a1a6-1d6c-81a1-c80ad5d25d28"
     allowfullscreen>
 </iframe>
 
 <script
     type="text/javascript"
-    data-iframe-id="sn-form-m1co4"
+    data-iframe-id="__ELFU_ID__"
     src="https://app.studioninja.co/client-assets/form-render/assets/scripts/iframeResizer.js">
 </script>
 HTML;
-    return apply_filters( 'eloping_seo_form_iframe_code', $code );
+    $code = str_replace( '__ELFU_ID__', $id, $code );
+    return apply_filters( 'eloping_seo_form_iframe_code', $code, $id );
 }
 
 /**
- * True when a saved value already IS the Studio Ninja iframe embed
- * (whitespace-tolerant, so a manually pasted copy is recognised too).
+ * True when a saved value is some Studio Ninja iframe embed.
  */
 function elfu_is_iframe_value( $value ) {
     return false !== strpos( (string) $value, 'studioninja.co/contactform/parser/' );
@@ -142,11 +163,16 @@ function elfu_seo_landing_page_ids() {
  *
  * Returns:
  *   array(
- *     'total_pages' => int,
- *     'fields'      => array( field => array(
- *        'label','iframe','cf7','empty','other','pending' ) ),
- *     'pending_total' => int, // total field-cells that will be written
+ *     'total_pages'   => int,
+ *     'fields'        => array( field => array(
+ *        'label','correct','fix','other_iframe','empty','pending' ) ),
+ *     'pending_total' => int,
  *   )
+ *
+ *   correct      — already exactly this field's target code
+ *   fix          — CF7 / empty / other / same form with the wrong internal
+ *                  id — will be (re)written
+ *   other_iframe — a DIFFERENT Studio Ninja form — intentionally skipped
  */
 function elfu_status() {
     $fields   = elfu_form_fields();
@@ -157,29 +183,31 @@ function elfu_status() {
         'pending_total' => 0,
     );
 
-    foreach ( $fields as $field => $label ) {
+    foreach ( $fields as $field => $spec ) {
+        $target = elfu_target_iframe_code( $spec['id'] );
         $counts = array(
-            'label'   => $label,
-            'iframe'  => 0, // already the Studio Ninja iframe (incl. manually updated)
-            'cf7'     => 0, // still the Contact Form 7 shortcode
-            'empty'   => 0, // field unset / blank
-            'other'   => 0, // anything else
-            'pending' => 0, // will be written
+            'label'        => $spec['label'],
+            'correct'      => 0,
+            'fix'          => 0,
+            'other_iframe' => 0,
+            'empty'        => 0,
+            'pending'      => 0,
         );
         foreach ( $pages as $pid ) {
             $key     = elfu_field_value_key( $pid, $field );
             $current = (string) get_post_meta( $pid, $key, true );
-            if ( elfu_is_iframe_value( $current ) ) {
-                $counts['iframe']++;
-            } elseif ( '' === trim( $current ) ) {
-                $counts['empty']++;
-                $counts['pending']++;
-            } elseif ( false !== strpos( $current, 'contact-form-7' ) ) {
-                $counts['cf7']++;
-                $counts['pending']++;
+            if ( trim( $current ) === trim( $target ) ) {
+                $counts['correct']++;
+            } elseif ( elfu_is_iframe_value( $current )
+                && false === strpos( $current, elfu_form_identifier() ) ) {
+                // A different Studio Ninja form — respect it, skip.
+                $counts['other_iframe']++;
             } else {
-                $counts['other']++;
+                $counts['fix']++;
                 $counts['pending']++;
+                if ( '' === trim( $current ) ) {
+                    $counts['empty']++;
+                }
             }
         }
         $result['fields'][ $field ]    = $counts;
@@ -193,22 +221,25 @@ function elfu_status() {
  * ========================================================================= */
 
 /**
- * Write the Studio Ninja iframe embed into every form field of every
- * SEO landing page that does not already have it.
+ * Write this field's embed code into every SEO landing page that does not
+ * already have exactly that code.
  *
- * Safety rules:
+ * Rules per field cell:
+ *  - value == target (whitespace-insensitive)          -> skip
+ *  - a DIFFERENT Studio Ninja form (different src)     -> skip (intentional)
+ *  - the SAME form but different id / whitespace / CF7 -> write target
+ *
+ * Safety:
  *  - Only pages with _wp_page_template = template-seo-landing.php.
- *  - Only the listed "Form Shortcode" fields (never any other field).
- *  - Cells that already contain the iframe are left completely alone.
- *  - Every value that IS changed is backed up first (one time) so the
- *    one-click Revert restores the originals exactly.
+ *  - Only the listed "Form Shortcode" fields.
+ *  - Every value that IS changed gets a one-time backup (earliest original
+ *    kept) so the Revert button restores the originals exactly.
  *
  * Backup shape: option => array( pid => array( field => array(
  *     'key','value','existed','ref_added','ts' ) ) )
  */
 function elfu_run_update() {
     $fields   = elfu_form_fields();
-    $target   = elfu_target_iframe_code();
     $pages    = elfu_seo_landing_page_ids();
     $backup   = get_option( ELFU_BACKUP_OPTION, array() );
     if ( ! is_array( $backup ) ) {
@@ -219,12 +250,20 @@ function elfu_run_update() {
     $skipped = 0;
 
     foreach ( $pages as $pid ) {
-        foreach ( array_keys( $fields ) as $field ) {
+        foreach ( $fields as $field => $spec ) {
+            $target  = elfu_target_iframe_code( $spec['id'] );
             $key     = elfu_field_value_key( $pid, $field );
             $current = (string) get_post_meta( $pid, $key, true );
 
-            // Already the Studio Ninja iframe (e.g. updated manually) — skip.
-            if ( elfu_is_iframe_value( $current ) ) {
+            // Already exactly this field's target — skip.
+            if ( trim( $current ) === trim( $target ) ) {
+                $skipped++;
+                continue;
+            }
+
+            // A different Studio Ninja form — skip (intentional custom form).
+            if ( elfu_is_iframe_value( $current )
+                && false === strpos( $current, elfu_form_identifier() ) ) {
                 $skipped++;
                 continue;
             }
@@ -335,8 +374,8 @@ function elfu_handle_actions() {
             array(
                 'type'    => 'success',
                 'message' => sprintf(
-                    /* translators: 1: updated field-cells, 2: skipped cells, 3: page count */
-                    __( 'Done — %1$d form field(s) updated with the Contact-page iframe form across %3$d SEO landing page(s). %2$d field(s) already had the iframe and were skipped. A rollback backup was saved; use the Revert button on this screen to undo.', 'eloping-seo-form-updater' ),
+                    /* translators: 1: updated field count, 2: skipped field count, 3: page count */
+                    __( 'Done — %1$d form field(s) updated with the Contact-page iframe form across %3$d SEO landing page(s). %2$d field(s) were already correct and were skipped. A rollback backup was saved; use the Revert button on this screen to undo.', 'eloping-seo-form-updater' ),
                     (int) $result['updated'],
                     (int) $result['skipped'],
                     (int) $result['total_pages']
@@ -358,7 +397,7 @@ function elfu_handle_actions() {
             array(
                 'type'    => 'success',
                 'message' => sprintf(
-                    /* translators: %d: restored field-cells */
+                    /* translators: %d: restored field count */
                     __( 'Reverted — %d form field(s) restored to their original value. Backup cleared.', 'eloping-seo-form-updater' ),
                     (int) $restored
                 ),
@@ -404,8 +443,9 @@ function elfu_render_page() {
             <h2><?php esc_html_e( 'What this does', 'eloping-seo-form-updater' ); ?></h2>
             <ul class="elfu-list">
                 <li><?php esc_html_e( 'Finds every page that uses the “SEO Landing” page template (the pages listed in your user-sitemap). Nothing else — no menu pages, no header/footer, no other page.', 'eloping-seo-form-updater' ); ?></li>
-                <li><?php esc_html_e( 'In BOTH “Form Shortcode” fields of those pages (the hero banner form and the bottom CTA band form), replaces the Contact Form 7 shortcode with the exact same Studio Ninja iframe embed that the Contact Us page uses — so the form stays consistent on every SEO landing page.', 'eloping-seo-form-updater' ); ?></li>
-                <li><?php esc_html_e( 'Fields that already show the iframe form (updated manually) are left untouched. No other ACF field, no theme file, no menu, no other page is modified — design and layout stay exactly as they are.', 'eloping-seo-form-updater' ); ?></li>
+                <li><?php esc_html_e( 'In BOTH “Form Shortcode” fields of those pages (the hero banner form and the bottom CTA band form), writes the exact same Studio Ninja form that the Contact Us page uses — same form, same fields, same submission destination, so the form stays consistent everywhere.', 'eloping-seo-form-updater' ); ?></li>
+                <li><?php esc_html_e( 'The two iframes on a page carry different internal ids (the CTA uses “sn-form-m1co4-cta”) — this is required, because the embed’s auto-height script tracks iframes by id; identical ids make it resize the wrong iframe and the form gets cut off.', 'eloping-seo-form-updater' ); ?></li>
+                <li><?php esc_html_e( 'Fields that already hold the correct code are left untouched. A different Studio Ninja form (different src) would be respected and skipped. No other ACF field, no theme file, no menu, no other page is modified — design and layout stay exactly as they are.', 'eloping-seo-form-updater' ); ?></li>
                 <li><?php esc_html_e( 'A full backup of the original values is saved first — the Revert button restores everything with one click.', 'eloping-seo-form-updater' ); ?></li>
                 <li><?php esc_html_e( 'If you use a page-cache plugin (WP Rocket, W3TC, LiteSpeed, etc.), clear/regenerate the cache after running so front-end visitors see the new forms.', 'eloping-seo-form-updater' ); ?></li>
             </ul>
@@ -414,10 +454,9 @@ function elfu_render_page() {
                 <thead>
                     <tr>
                         <th scope="col"><?php esc_html_e( 'Form field', 'eloping-seo-form-updater' ); ?></th>
-                        <th scope="col"><?php esc_html_e( 'Already iframe form', 'eloping-seo-form-updater' ); ?></th>
-                        <th scope="col"><?php esc_html_e( 'Still CF7 shortcode', 'eloping-seo-form-updater' ); ?></th>
-                        <th scope="col"><?php esc_html_e( 'Empty', 'eloping-seo-form-updater' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'Already correct', 'eloping-seo-form-updater' ); ?></th>
                         <th scope="col"><?php esc_html_e( 'Will be updated', 'eloping-seo-form-updater' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'Different SN form (skipped)', 'eloping-seo-form-updater' ); ?></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -425,19 +464,9 @@ function elfu_render_page() {
                     <tr>
                         <td><strong><?php echo esc_html( $counts['label'] ); ?></strong><br>
                             <code><?php echo esc_html( $field ); ?></code></td>
-                        <td><?php echo esc_html( number_format_i18n( $counts['iframe'] ) ); ?></td>
-                        <td><?php echo esc_html( number_format_i18n( $counts['cf7'] ) ); ?></td>
-                        <td><?php
-                            $e_parts = array();
-                            if ( (int) $counts['empty'] > 0 ) {
-                                $e_parts[] = number_format_i18n( (int) $counts['empty'] );
-                            }
-                            if ( (int) $counts['other'] > 0 ) {
-                                $e_parts[] = number_format_i18n( (int) $counts['other'] ) . ' other';
-                            }
-                            echo esc_html( $e_parts ? implode( ' + ', $e_parts ) : '0' );
-                        ?></td>
-                        <td><strong><?php echo esc_html( number_format_i18n( $counts['pending'] ) ); ?></strong></td>
+                        <td><?php echo esc_html( number_format_i18n( $counts['correct'] ) ); ?></td>
+                        <td><strong><?php echo esc_html( number_format_i18n( $counts['pending'] ) ); ?></strong><?php if ( $counts['empty'] > 0 ) : ?> (<?php echo esc_html( number_format_i18n( $counts['empty'] ) ); ?> <?php esc_html_e( 'empty', 'eloping-seo-form-updater' ); ?>)<?php endif; ?></td>
+                        <td><?php echo esc_html( number_format_i18n( $counts['other_iframe'] ) ); ?></td>
                     </tr>
                 <?php endforeach; ?>
                     <tr>
@@ -446,8 +475,9 @@ function elfu_render_page() {
                             __( '%d SEO landing page(s) in total', 'eloping-seo-form-updater' ),
                             (int) $status['total_pages']
                         ) ); ?></strong></td>
-                        <td colspan="3"></td>
+                        <td></td>
                         <td><strong><?php echo esc_html( number_format_i18n( $status['pending_total'] ) ); ?></strong> <?php esc_html_e( 'field(s)', 'eloping-seo-form-updater' ); ?></td>
+                        <td></td>
                     </tr>
                 </tbody>
             </table>
@@ -462,7 +492,7 @@ function elfu_render_page() {
                 </button>
             </form>
             <?php else : ?>
-            <p class="elfu-ok">&#10003; <?php esc_html_e( 'All form fields on all SEO landing pages already have the Contact-page iframe form — nothing to do.', 'eloping-seo-form-updater' ); ?></p>
+            <p class="elfu-ok">&#10003; <?php esc_html_e( 'All form fields on all SEO landing pages already have the correct Contact-page iframe form — nothing to do.', 'eloping-seo-form-updater' ); ?></p>
             <?php endif; ?>
 
             <?php if ( $has_back ) : ?>
@@ -470,7 +500,7 @@ function elfu_render_page() {
                 <?php wp_nonce_field( 'eloping_seo_form_revert', 'eloping_seo_form_revert_nonce' ); ?>
                 <input type="hidden" name="eloping_seo_form_update" value="revert" />
                 <button type="submit" class="button"
-                    onclick="return confirm('<?php echo esc_js( __( 'Revert ALL SEO landing pages back to their original form field values? The backup will be cleared afterwards.', 'eloping-seo-form-updater' ) ); ?>');">
+                    onclick="return confirm('<?php echo esc_js( __( 'Revert ALL SEO landing pages back to their original form field values (Contact Form 7)? The backup will be cleared afterwards.', 'eloping-seo-form-updater' ) ); ?>');">
                     <?php esc_html_e( 'Revert to Originals', 'eloping-seo-form-updater' ); ?>
                 </button>
             </form>
@@ -479,8 +509,18 @@ function elfu_render_page() {
 
         <div class="card elfu-card">
             <h2><?php esc_html_e( 'The exact code that will be written into the “Form Shortcode” fields', 'eloping-seo-form-updater' ); ?></h2>
-            <p><?php esc_html_e( 'Identical to the Contact Us page’s Studio Ninja iframe embed (same form, same consistency on hero + CTA):', 'eloping-seo-form-updater' ); ?></p>
-            <pre class="elfu-code"><?php echo esc_html( elfu_target_iframe_code() ); ?></pre>
+            <?php foreach ( elfu_form_fields() as $field => $spec ) : ?>
+                <p><strong><?php echo esc_html( $spec['label'] ); ?></strong> <code><?php echo esc_html( $field ); ?></code>
+                    <?php if ( 'sn-form-m1co4' !== $spec['id'] ) : ?>
+                    — <?php echo esc_html( sprintf(
+                        /* translators: %s: iframe id */
+                        __( 'same form, internal id “%s” to avoid colliding with the hero iframe', 'eloping-seo-form-updater' ),
+                        $spec['id']
+                    ) ); ?>
+                    <?php endif; ?>
+                </p>
+                <pre class="elfu-code"><?php echo esc_html( elfu_target_iframe_code( $spec['id'] ) ); ?></pre>
+            <?php endforeach; ?>
         </div>
     </div>
     <style>
@@ -488,7 +528,7 @@ function elfu_render_page() {
         .elfu-wrap .elfu-status{max-width:820px;margin-top:14px;}
         .elfu-wrap .elfu-list{margin:6px 0 4px 18px;line-height:1.7;}
         .elfu-wrap .elfu-actions{margin-top:18px;}
-        .elfu-wrap .elfu-code{background:#f6f7f7;border:1px solid #dcdcde;border-radius:4px;padding:14px;font-size:12px;line-height:1.5;overflow:auto;}
+        .elfu-wrap .elfu-code{background:#f6f7f7;border:1px solid #dcdcde;border-radius:4px;padding:14px;font-size:12px;line-height:1.5;overflow:auto;margin-bottom:18px;}
         .elfu-wrap .elfu-ok{margin-top:16px;font-size:15px;color:#007017;}
     </style>
     <?php
